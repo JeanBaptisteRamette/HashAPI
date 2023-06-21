@@ -3,6 +3,7 @@
 
 #include <Windows.h>
 #include <winternl.h>
+#include <intrin.h>
 
 
 
@@ -47,7 +48,7 @@ struct NT_PEB
 	BYTE SpareBool;
 	LPVOID Mutant;
 	LPVOID ImageBaseAddress;
-	PPEB_LDR_DATA Ldr;
+	PNT_PEB_LDR_DATA Ldr;
 	LPVOID ProcessParameters;
 	LPVOID SubSystemData;
 	LPVOID ProcessHeap;

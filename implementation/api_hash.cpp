@@ -2,11 +2,10 @@
 #include <iostream>
 #include <string_view>
 
-#include "intrin.h"
 #include "ntdef64.h"
 
 
-// Make a template because module name are stored as wide strings in the PEB
+// Make a template because module names are stored as wide strings in the PEB
 template<typename char_type>
 constexpr
 uint32_t SymHash(char_type* Symbol)
@@ -113,17 +112,59 @@ LPVOID ResolveAPI(uint32_t ModuleHash, uint32_t ProcedureHash)
     return ResolveProcedure((LPBYTE)Module->DllBase, ProcedureHash);
 }
 
+using pCreateFileW = HANDLE(*)(
+            LPCWSTR,
+            DWORD,
+            DWORD,
+            LPSECURITY_ATTRIBUTES,
+            DWORD,
+            DWORD,
+            HANDLE
+        );
+
+using pWriteFile = BOOL(*)(
+            HANDLE,
+            LPCVOID,
+            DWORD,
+            LPDWORD,
+            LPOVERLAPPED
+        );
+
+using pCloseHandle = BOOL(*)(HANDLE);
+
 
 int main(int argc, char** argv)
 {
-    constexpr auto DigestModule      = SymHash(L"USER32.dll");
-    constexpr auto DigestMessageBoxA = SymHash("MessageBoxA");
+    constexpr auto DigestModule      = SymHash(L"KERNEL32.DLL");
+    constexpr auto DigestCreateFileW = SymHash("CreateFileW");
+    constexpr auto DigestCloseHandle = SymHash("CloseHandle");
+    constexpr auto DigestWriteFile   = SymHash("WriteFile");
 
-    using pMessageBoxA = int(*)(HWND, LPCSTR, LPCSTR, UINT);
+    void* ptrCreateFileW = ResolveAPI(DigestModule, DigestCreateFileW);
+    void* ptrCloseHandle = ResolveAPI(DigestModule, DigestCloseHandle);
+    void* ptrWriteFile   = ResolveAPI(DigestModule, DigestWriteFile);
 
-    const auto MessageBoxA = reinterpret_cast<pMessageBoxA>(ResolveAPI(DigestModule, DigestMessageBoxA));
+    if (ptrCreateFileW && ptrCloseHandle && ptrWriteFile)
+    {
+        auto CreateFileW = reinterpret_cast<pCreateFileW>(ptrCreateFileW);
+        auto CloseHandle = reinterpret_cast<pCloseHandle>(ptrCloseHandle);
+        auto WriteFile   = reinterpret_cast<pWriteFile>(ptrWriteFile);
 
-    MessageBoxA(nullptr, "XXX", "YYY", 0);
+        HANDLE FileHandle = CreateFileW(L"demo.txt",
+                                        FILE_APPEND_DATA,
+                                        FILE_SHARE_READ,
+                                        nullptr,
+                                        OPEN_ALWAYS,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+
+        DWORD dwBytesWritten {};
+
+        WriteFile(FileHandle, "What does this do ?", 19, &dwBytesWritten, nullptr);
+
+        CloseHandle(FileHandle);
+    }
+
 
     return 0;
 }
