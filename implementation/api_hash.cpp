@@ -1,9 +1,7 @@
 #include <cstdint>
-#include <iostream>
 #include <string_view>
 
 #include "ntdef64.h"
-
 
 // Make a template because module names are stored as wide strings in the PEB
 template<typename char_type>
@@ -36,8 +34,8 @@ PNT_LDR_DATA_TABLE_ENTRY ResolveInMemoryModule(uint32_t ModuleHash)
     const auto Peb = NtCurrentPeb();
     const auto LoaderData = Peb->Ldr;
 
-    const PLIST_ENTRY Head = &LoaderData->InMemoryOrderModuleList;
-    PLIST_ENTRY ModuleNode = nullptr;
+    const LIST_ENTRY* Head = &LoaderData->InMemoryOrderModuleList;
+    const LIST_ENTRY* ModuleNode = nullptr;
 
     for (ModuleNode = Head->Flink; ModuleNode != Head ; ModuleNode = ModuleNode->Flink)
     {
@@ -102,14 +100,20 @@ LPVOID ResolveProcedure(LPBYTE ImageBase, uint32_t ProcedureHash)
 }
 
 
-LPVOID ResolveAPI(uint32_t ModuleHash, uint32_t ProcedureHash)
+template<typename Function>
+Function ResolveAPI(uint32_t ModuleHash, uint32_t ProcedureHash)
 {
-    const PNT_LDR_DATA_TABLE_ENTRY Module = ResolveInMemoryModule(ModuleHash);
+    NT_LDR_DATA_TABLE_ENTRY* const Module = ResolveInMemoryModule(ModuleHash);
 
     if (!Module)
         return nullptr;
 
-    return ResolveProcedure((LPBYTE)Module->DllBase, ProcedureHash);
+    void* Proc = ResolveProcedure((LPBYTE)Module->DllBase, ProcedureHash);
+
+    if (Proc == nullptr)
+        return nullptr;
+
+    return reinterpret_cast<Function>(Proc);
 }
 
 using pCreateFileW = HANDLE(*)(
@@ -140,16 +144,12 @@ int main(int argc, char** argv)
     constexpr auto DigestCloseHandle = SymHash("CloseHandle");
     constexpr auto DigestWriteFile   = SymHash("WriteFile");
 
-    void* ptrCreateFileW = ResolveAPI(DigestModule, DigestCreateFileW);
-    void* ptrCloseHandle = ResolveAPI(DigestModule, DigestCloseHandle);
-    void* ptrWriteFile   = ResolveAPI(DigestModule, DigestWriteFile);
+    const auto CreateFileW = ResolveAPI<pCreateFileW>(DigestModule, DigestCreateFileW);
+    const auto CloseHandle = ResolveAPI<pCloseHandle>(DigestModule, DigestCloseHandle);
+    const auto WriteFile   = ResolveAPI<pWriteFile>(DigestModule, DigestWriteFile);
 
-    if (ptrCreateFileW && ptrCloseHandle && ptrWriteFile)
+    if (CreateFileW && CloseHandle && WriteFile)
     {
-        auto CreateFileW = reinterpret_cast<pCreateFileW>(ptrCreateFileW);
-        auto CloseHandle = reinterpret_cast<pCloseHandle>(ptrCloseHandle);
-        auto WriteFile   = reinterpret_cast<pWriteFile>(ptrWriteFile);
-
         HANDLE FileHandle = CreateFileW(L"demo.txt",
                                         FILE_APPEND_DATA,
                                         FILE_SHARE_READ,
