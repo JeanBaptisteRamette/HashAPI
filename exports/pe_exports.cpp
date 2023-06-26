@@ -14,8 +14,43 @@
 
 #include <windows.h>
 
+#include <Python.h>
+
 
 namespace fs = std::filesystem;
+
+
+namespace detail::concurrency
+{
+    std::mutex cout_mutex;
+    std::mutex cerr_mutex;
+}
+
+
+using digest_t = long long;
+
+
+template<typename ...Args>
+void print(std::ostream& os, std::string_view fmt, Args&&... args)
+{
+    std::lock_guard stream_lock(detail::concurrency::cout_mutex);
+    os << std::vformat(fmt, std::make_format_args(args...));
+}
+
+template<typename ...Args>
+void print(std::string_view fmt, Args&&... args)
+{
+    std::lock_guard stream_lock(detail::concurrency::cout_mutex);
+    std::cout << std::vformat(fmt, std::make_format_args(args...));
+}
+
+
+template<typename ...Args>
+void printerr(std::string_view fmt, Args&&... args)
+{
+    std::lock_guard stream_lock(detail::concurrency::cerr_mutex);
+    std::cerr << std::vformat(fmt, std::make_format_args(args...));
+}
 
 
 class params
@@ -51,7 +86,6 @@ public:
         if (param.empty())
             return 0;
 
-
         const char* beg = std::data(param);
         const char* end = beg + std::size(param);
         unsigned int iparam {};
@@ -69,17 +103,25 @@ public:
         return std::find(beg, end, option) != end;
     }
 
+    static bool has_value(std::string_view option)
+    {
+        const std::string_view value = param_of(option);
+
+        return !value.empty();
+    }
+
     static void help()
     {
         const std::string_view usage =
-                "Usage: {} -d <input directory> -f <input file> -o <output file> -t <thread counts> [-r] [-of (lazy|json)]\n"
-                "\t-o optional output file, default is exported.txt\n"
-                "\t-r optional recursive flag\n"
-                "\t-v skip file that don't have .DLL/.dll extension\n"
+                "Usage: {} -d <input directory> -f <input file> -o <output file> -t <thread counts> [-r] [-of (lazy|json)] -p <python file>\n"
+                "\t-o  optional output file, default is exported.txt\n"
+                "\t-r  optional recursive flag\n"
+                "\t-v  skip file that don't have .DLL/.dll extension\n"
+                "\t-p  path to a python file containing the hashing function to create a hashtable\n"
                 "\t-of output format, default is lazy\n"
                 "The program will not run if both -d and -f arguments are not given\n";
 
-        std::cout << std::vformat(usage, std::make_format_args(program_name));
+        print(std::cout, usage, program_name);
     }
 
 private:
@@ -88,30 +130,191 @@ private:
 };
 
 
-namespace detail::concurrency
+
+namespace py
 {
-    std::mutex cout_mutex;
-}
+    void PySys_AppendPath(std::string_view modules_directory)
+    {
+        PyObject* msys {};
+        PyObject* path {};
 
+        msys = PyImport_ImportModule("sys");
 
-template<typename ...Args>
-void print(std::string_view fmt, Args&&... args)
-{
-    std::lock_guard lock(detail::concurrency::cout_mutex);
+        if (msys == nullptr)
+            return;
 
-    std::cout << std::vformat(fmt, std::make_format_args(args...));
+        path = PyObject_GetAttrString(msys, "path");
+
+        if (path == nullptr)
+            return;
+
+        PyList_Append(path, PyUnicode_FromString(modules_directory.data()));
+    }
+
+    class hash_function
+    {
+    public:
+        explicit hash_function(PyObject* callable)
+            : hasher(callable)
+        {}
+
+        ~hash_function() = default;
+
+        explicit operator bool() const
+        {
+            return hasher && PyCallable_Check(hasher);
+        }
+
+        digest_t operator()(std::string_view input) const
+        {
+            // TODO: different errcode
+            if (!*this)
+                return 0;
+
+            PyObject* param_tuple = PyTuple_New(1);
+            PyObject* param_value = PyUnicode_FromString(input.data());
+
+            PyTuple_SetItem(param_tuple, 0, param_value);
+
+            if (!param_value)
+            {
+                printerr("Error building hash function argument for value {}\n", input);
+                PyErr_Print();
+                return 0;
+            }
+
+            PyObject* digest = PyObject_CallObject(hasher, param_tuple);
+
+            if (!digest)
+            {
+                printerr("Error building return value for hash function\n");
+                PyErr_Print();
+                return 0;
+            }
+
+            return static_cast<digest_t>(PyLong_AsLongLong(digest));
+        }
+
+    private:
+        PyObject* hasher;
+    };
+
+    //  wrapper for the python context
+    class context
+    {
+        class raii_context
+        {
+        public:
+            raii_context()  { Py_Initialize(); }
+            ~raii_context() { Py_Finalize();   }
+        };
+
+        static raii_context raii_instance;
+
+        inline static PyObject* imported_module;
+        inline static PyObject* imported_function;
+
+    public:
+        static bool import_module(std::string_view module_path_)
+        {
+            // a module or function was already imported
+            if (imported_module || imported_function)
+                return false;
+
+            fs::path module_path = module_path_;
+            const std::string modname = module_path.filename().replace_extension().string();
+            const std::string moddir  = module_path.remove_filename().string();
+
+            PySys_AppendPath(moddir);
+
+            imported_module = PyImport_ImportModule(modname.data());
+
+            if (!imported_module)
+            {
+                PyErr_Print();
+                return false;
+            }
+
+            return true;
+        }
+
+        static bool resolve_function(std::string_view function_name)
+        {
+            // module could not be imported or a function was already imported
+            if (!imported_module || imported_function)
+                return false;
+
+            PyObject* symbol = PyObject_GetAttrString(imported_module, function_name.data());
+
+            if (!symbol)
+            {
+                PyErr_Print();
+                return false;
+            }
+
+            if (!PyCallable_Check(symbol))
+            {
+                printerr("Symbol {} is not a function\n", function_name);
+                return false;
+            }
+
+            imported_function = symbol;
+
+            return true;
+        }
+
+        static PyObject* get_imported_function()
+        {
+            return imported_function;
+        }
+    };
+
+    context::raii_context context::raii_instance {};
+
+    class gil_guard
+    {
+    public:
+        gil_guard()
+        {
+            state = PyGILState_Ensure();
+        }
+
+        ~gil_guard()
+        {
+            PyGILState_Release(state);
+        }
+
+    private:
+        PyGILState_STATE state;
+    };
+
+    class enable_threads
+    {
+    public:
+        enable_threads()
+        {
+            state = PyEval_SaveThread();
+        }
+
+        ~enable_threads()
+        {
+            PyEval_RestoreThread(state);
+        }
+
+    private:
+        PyThreadState* state;
+    };
 }
 
 
 namespace exports
 {
-    constexpr uint16_t SIG_DOS = 0x5A4D;
-    constexpr uint16_t SIG_PE  = 0x4550;
-
     struct result
     {
         std::string module;
         std::vector<std::string> exported_symbols;
+        std::unordered_multimap<long long, std::string> hashtable;
+
         bool ok {};
     };
 
@@ -160,7 +363,7 @@ namespace exports
 
         if (params::has_option("-r"))
         {
-            const fs::recursive_directory_iterator walker(path_dir);
+            const fs::recursive_directory_iterator walker(path_dir, ec);
             queue_entries(walker);
         } else
         {
@@ -170,6 +373,9 @@ namespace exports
 
         if (!path_file.empty() && fs::exists(path_file))
 			files.push(path_file);
+
+        if (files.empty())
+            std::cerr << "Could not enumerate files from provided arguments, no such directory or no files to process\n";
 
         return files;
     }
@@ -238,7 +444,7 @@ namespace exports
 
         if (header->e_magic != IMAGE_DOS_SIGNATURE)
         {
-            print("Dropping file because of wrong DOS header signature");
+            printerr("Dropping file because of wrong DOS header signature\n");
             return nullptr;
         }
 
@@ -255,13 +461,13 @@ namespace exports
 
         if (nthdrs->Signature != IMAGE_NT_SIGNATURE)
         {
-            print("Dropping file because of wrong PE header signature");
+            printerr("Dropping file because of wrong PE header signature");
             return nullptr;
         }
 
         if (!(nthdrs->FileHeader.Characteristics & IMAGE_FILE_DLL))
         {
-            print("Dropping file because of wrong file header characteristics (!IMAGE_FILE_DLL)");
+            printerr("Dropping file because of wrong file header characteristics (!IMAGE_FILE_DLL)");
             return nullptr;
         }
 
@@ -274,7 +480,7 @@ namespace exports
 
         if (nthdrs->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
         {
-            print("Dropping file because of wrong optional header signature");
+            printerr("Dropping file because of wrong optional header signature");
             return nullptr;
         }
 
@@ -294,7 +500,7 @@ namespace exports
         return (PIMAGE_EXPORT_DIRECTORY)(pe_base + rva2offset(export_descriptor.VirtualAddress, nthdrs));
     }
 
-    bool process_file_internal(const std::vector<uint8_t>& data, std::vector<std::string>& exports)
+    bool enumerate_exports(const std::vector<uint8_t>& data, std::vector<std::string>& exports)
     {
         // TODO: check for nullptr on function returns
         // TODO: use a string view to check for out-of-bounds
@@ -319,7 +525,23 @@ namespace exports
         return true;
     }
 
-    result process_file(int id, const fs::path& path)
+    std::unordered_multimap<digest_t, std::string> make_hashtable(std::vector<std::string>& symbols)
+    {
+        std::unordered_multimap<digest_t, std::string> hashtable;
+        hashtable.reserve(symbols.size());
+
+        py::gil_guard lock_guard;
+
+        py::hash_function hasher(py::context::get_imported_function());
+
+        if (hasher)
+            for (auto& symbol: symbols)
+                hashtable.insert( { hasher(symbol), std::move(symbol) } );
+
+        return hashtable;
+    }
+
+    result process_file(size_t tid [[maybe_unused]], const fs::path& path)
     {
         result result;
 
@@ -330,25 +552,28 @@ namespace exports
 
         if (err)
         {
-            print("Could not read data from file {}\n", path.string());
+            printerr("Could not read data from file {}\n", path.string());
             result.ok = false;
             return {};
         }
 
         result.module = path.filename().string();
 
-        if (!process_file_internal(data, result.exported_symbols))
+        if (!enumerate_exports(data, result.exported_symbols))
         {
             result.exported_symbols.clear();
             result.ok = false;
 
-            print("{} processing aborted\n", path.string());
+            printerr("Format error, {} processing aborted\n", path.string());
             return result;
         }
 
-        print("Processed: {}\n", path.string());
-
         result.ok = true;
+
+        if (!params::has_value("-p"))
+            return result;
+
+        result.hashtable = make_hashtable(result.exported_symbols);
 
         return result;
     }
@@ -358,7 +583,6 @@ namespace exports
         lazy,
         json
     };
-
 
     class writer
     {
@@ -389,15 +613,21 @@ namespace exports
             if (fail())
                 return;
 
-            const auto& [module, exports, _] = data;
+            const auto& [module, symbols, hashtable, _] = data;
 
             if (format == output_fmt::lazy)
             {
-                for (const auto& exported : exports)
-                    ostream << module << ' ' << exported << '\n';
+                if (hashtable.empty())
+                    for (const auto& sym : symbols)
+                        print(ostream, "{} {}\n", module, sym);
+                else
+                    for (const auto& [hash, sym] : hashtable)
+                        print(ostream, "{} {:#x} {}\n", module, hash, sym);
 
                 return;
             }
+
+            throw std::runtime_error("JSON output not fully implemented yet");
 
             if (!first_block)
                 ostream << ",\n";
@@ -406,18 +636,23 @@ namespace exports
 
 
             // JSON output
+            // "hashed": {
+            //	    "0xDEADBEEF": "LoadLibraryA",
+            //	    "0x000C0FEE": "CloseHandle"
+            //	}
+            //
             constexpr std::string_view fmt =
             "\t{{\n"
-            "\t\t\"library\": \"{}\"\n"
+            "\t\t\"library\": \"{}\",\n"
             "\t\t\"exports\": [\n";
 
             ostream << std::vformat(fmt, std::make_format_args(module));
 
-            for (size_t i = 0; i < exports.size(); ++i)
+            for (size_t i = 0; i < symbols.size(); ++i)
             {
-                ostream << "\t\t\t" << std::quoted(exports[i]);
+                ostream << "\t\t\t" << std::quoted(symbols[i]);
 
-                if (i != exports.size() - 1)
+                if (i != symbols.size() - 1)
                     ostream << ",";
 
                 ostream << '\n';
@@ -432,6 +667,52 @@ namespace exports
         std::ofstream ostream;
         bool first_block = true;
     };
+
+    output_fmt write_format()
+    {
+        if (params::param_of("-of") == "json")
+            return exports::output_fmt::json;
+
+        return exports::output_fmt::lazy;
+    }
+
+    std::string_view output_path()
+    {
+        if (!params::has_value("-o"))
+            return "exported.txt";
+
+        return params::param_of("-o");
+    }
+
+    bool write_results(std::vector<std::future<result>>& futures)
+    {
+        writer writer(
+            output_path(),
+            write_format()
+        );
+
+        if (writer.fail())
+        {
+            printerr("Failed to open output stream. Aborting\n");
+            return false;
+        }
+
+        std::vector<exports::result> results;
+
+        for (auto& future : futures)
+        {
+            results.push_back(std::move(future.get()));
+            const auto& result = results.back();
+
+            if (result.ok)
+            {
+                writer.write(result);
+                print("Processed {}\n", result.module);
+            }
+        }
+
+        return true;
+    }
 }
 
 
@@ -439,77 +720,46 @@ int main(int argc, char** argv)
 {
     params::parse(argc, argv);
 
-    if (params::has_option("-h"))
+    if (params::has_option("-h") || (!params::has_value("-d") && !params::has_value("-f")))
     {
         params::help();
         return EXIT_SUCCESS;
     }
 
-    const auto path_dir  = params::param_of("-d");
-    const auto path_file = params::param_of("-f");
-
-    if (path_dir.empty() && path_file.empty())
-    {
-        params::help();
-        return EXIT_FAILURE;
-    }
-
-    auto fpath_queue = exports::enumerate_files(path_dir, path_file);
+    auto fpath_queue = exports::enumerate_files(
+                            params::param_of("-d"),
+                            params::param_of("-f")
+                       );
 
     if (fpath_queue.empty())
-    {
-        std::cerr << "Could not enumerate files from provided arguments" << '\n';
         return EXIT_FAILURE;
-    }
 
-    const auto total_tasks = fpath_queue.size();
-    const auto threads_count = exports::read_threads_count(total_tasks);
+    const size_t total_tasks = fpath_queue.size();
+    const size_t threads_count = exports::read_threads_count(total_tasks);
 
     ctpl::thread_pool pool(threads_count);
-    std::vector<std::future<exports::result>> results;
+    std::vector<std::future<exports::result>> futures;
 
-    // NOTE: queue does not need to be thread-safe.
+    if (params::has_value("-p"))
+    {
+        const auto python_file = params::param_of("-p");
+        if (!py::context::import_module(python_file) || !py::context::resolve_function("digest"))
+            printerr("Could not import function from python file {}\n", python_file);
+    }
+
+    py::enable_threads et;
+
+    // create workers
     while (!fpath_queue.empty())
     {
-        const auto file = fpath_queue.front();
+        fs::path file = fpath_queue.front();
         fpath_queue.pop();
 
-        results.push_back(
-            pool.push(exports::process_file, file)
+        // add a new task
+        futures.push_back(
+            pool.push(exports::process_file, std::move(file))
         );
     }
 
-    const auto write_format = []() -> exports::output_fmt
-    {
-        if (params::param_of("-of") == "json")
-            return exports::output_fmt::json;
-
-        return exports::output_fmt::lazy;
-    }();
-
-    const auto output_path = []() -> std::string_view
-    {
-        if (!params::has_option("-o"))
-            return "exported.txt";
-
-        return params::param_of("-o");
-    }();
-
-    exports::writer writer(output_path, write_format);
-
-    if (writer.fail())
-    {
-        pool.stop();
-        return EXIT_FAILURE;
-    }
-
-    for (auto& future : results)
-    {
-        exports::result result = future.get();
-
-        if (result.ok)
-            writer.write(result);
-    }
-
-	return EXIT_SUCCESS;
+    return exports::write_results(futures) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
