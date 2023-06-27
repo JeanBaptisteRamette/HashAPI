@@ -17,6 +17,8 @@
 #include <Python.h>
 
 
+// TODO: PyObject RAII
+
 namespace fs = std::filesystem;
 
 
@@ -309,11 +311,17 @@ namespace py
 
 namespace exports
 {
+    struct hash_pair
+    {
+        digest_t hash;
+        std::string symbol;
+    };
+
     struct result
     {
         std::string module;
         std::vector<std::string> exported_symbols;
-        std::unordered_multimap<long long, std::string> hashtable;
+        std::vector<hash_pair> hashtable;
 
         bool ok {};
     };
@@ -525,9 +533,9 @@ namespace exports
         return true;
     }
 
-    std::unordered_multimap<digest_t, std::string> make_hashtable(std::vector<std::string>& symbols)
+    std::vector<hash_pair> make_hashtable(std::vector<std::string>& symbols)
     {
-        std::unordered_multimap<digest_t, std::string> hashtable;
+        std::vector<hash_pair> hashtable;
         hashtable.reserve(symbols.size());
 
         py::gil_guard lock_guard;
@@ -536,7 +544,7 @@ namespace exports
 
         if (hasher)
             for (auto& symbol: symbols)
-                hashtable.insert( { hasher(symbol), std::move(symbol) } );
+                hashtable.push_back( { hasher(symbol), std::move(symbol) } );
 
         return hashtable;
     }
@@ -608,26 +616,24 @@ namespace exports
             return ostream.fail();
         }
 
-        void write(const exports::result& data)
-        {
+        void write(const exports::result& data) {
             if (fail())
                 return;
 
-            const auto& [module, symbols, hashtable, _] = data;
+            const auto &[module, symbols, hashtable, _] = data;
 
-            if (format == output_fmt::lazy)
-            {
+            if (format == output_fmt::lazy) {
                 if (hashtable.empty())
-                    for (const auto& sym : symbols)
+                    for (const auto &sym: symbols)
                         print(ostream, "{} {}\n", module, sym);
                 else
-                    for (const auto& [hash, sym] : hashtable)
+                    for (const auto &[hash, sym]: hashtable)
                         print(ostream, "{} {:#x} {}\n", module, hash, sym);
 
                 return;
             }
 
-            throw std::runtime_error("JSON output not fully implemented yet");
+            // throw std::runtime_error("JSON output not fully implemented yet");
 
             if (!first_block)
                 ostream << ",\n";
@@ -642,21 +648,39 @@ namespace exports
             //	}
             //
             constexpr std::string_view fmt =
-            "\t{{\n"
-            "\t\t\"library\": \"{}\",\n"
-            "\t\t\"exports\": [\n";
+                    "\t{{\n"
+                    "\t\t\"library\": \"{}\",\n";
 
             ostream << std::vformat(fmt, std::make_format_args(module));
 
-            for (size_t i = 0; i < symbols.size(); ++i)
+            if (hashtable.empty())
             {
-                ostream << "\t\t\t" << std::quoted(symbols[i]);
+                ostream << "\t\t\"exports\": [\n";
+                for (size_t i = 0; i < symbols.size(); ++i)
+                {
+                    ostream << "\t\t\t" << std::quoted(symbols[i]);
 
-                if (i != symbols.size() - 1)
-                    ostream << ",";
+                    if (i != symbols.size() - 1)
+                        ostream << ",";
 
-                ostream << '\n';
+                    ostream << '\n';
+                }
             }
+            else
+            {
+                ostream << "\t\t\"hashed\": {\n";
+                for (size_t i = 0; i < hashtable.size(); ++i)
+                {
+                    const auto& [hash, symbol] = hashtable[i];
+                    ostream << std::vformat("\t\t\t\"{:#x}\": \"{}\"", std::make_format_args(hash, symbol));
+
+                    if (i != symbols.size() - 1)
+                        ostream << ",";
+
+                    ostream << '\n';
+                }
+            }
+
 
             ostream << "\t\t]\n\t}";
         }
