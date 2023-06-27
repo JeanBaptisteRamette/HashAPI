@@ -57,7 +57,7 @@ public:
         program_name = argv[0];
     }
 
-    static std::string_view param_of(std::string_view option)
+    static std::string_view param_of(std::string_view option, std::string_view default_value = {})
     {
         const auto beg = std::cbegin(tokens);
         const auto end = std::cend(tokens);
@@ -67,7 +67,7 @@ public:
         if (itr != end && ++itr != end)
             return *itr;
 
-        return {};
+        return default_value;
     }
 
     static unsigned int iparam_of(std::string_view option, std::from_chars_result& result)
@@ -109,6 +109,7 @@ public:
                 "\t-r  optional recursive flag\n"
                 "\t-v  skip file that don't have .DLL/.dll extension\n"
                 "\t-p  path to a python file containing the hashing function to create a hashtable\n"
+                "\t-H  name of the python hashing function to execute, default is \"digest\"\n"
                 "\t-of output format, default is lazy\n"
                 "The program will not run if both -d and -f arguments are not given\n";
 
@@ -730,18 +731,10 @@ namespace exports
         return exports::output_fmt::lazy;
     }
 
-    std::string_view output_path()
-    {
-        if (!params::has_value("-o"))
-            return "exported.txt";
-
-        return params::param_of("-o");
-    }
-
     bool write_results(std::vector<std::future<result>>& futures)
     {
         writer writer(
-            output_path(),
+            params::param_of("-o", "exported.txt"),
             write_format()
         );
 
@@ -797,8 +790,10 @@ int main(int argc, char** argv)
     if (params::has_value("-p"))
     {
         const auto python_file = params::param_of("-p");
-        if (!py::context::import_module(python_file) || !py::context::resolve_function("digest"))
-            printerr("Could not import function from python file {}\n", python_file);
+        const auto python_func = params::param_of("-H", "digest");
+
+        if (!py::context::import_module(python_file) || !py::context::resolve_function(python_func))
+            printerr("Could not import function {} from python file {}\n", python_func, python_file);
     }
 
     py::enable_threads et;
