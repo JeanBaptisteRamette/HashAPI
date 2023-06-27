@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <future>
 #include <format>
@@ -16,8 +17,6 @@
 
 #include <Python.h>
 
-
-// TODO: PyObject RAII
 
 namespace fs = std::filesystem;
 
@@ -135,19 +134,70 @@ private:
 
 namespace py
 {
+    enum class semantic
+    {
+        owning,
+        shared
+    };
+
+    class PyObject_Ref
+    {
+        // NOTE: Py_XINCREF/Py_XDECREF already checks for nullptr
+
+    public:
+        PyObject_Ref() : handle(nullptr) {}
+
+        PyObject_Ref(PyObject* ptr, semantic ownership = semantic::owning) : handle(ptr)
+        {
+            if (ownership == semantic::shared)
+                Py_XINCREF(handle);
+        }
+
+        ~PyObject_Ref() { Py_XDECREF(handle); }
+
+        PyObject_Ref(const PyObject_Ref& right) : handle(right.handle) { Py_XINCREF(handle); }
+        PyObject_Ref(PyObject_Ref&& right) : handle(nullptr)
+        {
+            std::swap(handle, right.handle);
+        }
+
+        PyObject_Ref& operator=(const PyObject_Ref& right) noexcept
+        {
+            PyObject_Ref tmp(right);
+            std::swap(handle, tmp.handle);
+            return *this;
+        }
+
+        PyObject_Ref& operator=(PyObject_Ref&& right) noexcept
+        {
+            std::swap(handle, right.handle);
+            return *this;
+        }
+
+        PyObject_Ref& operator=(PyObject* ptr) noexcept
+        {
+            handle = ptr;
+            return *this;
+        }
+
+        operator bool()      const { return handle != nullptr; }
+        operator PyObject*() const { return handle; }
+
+    private:
+        PyObject* handle;
+    };
+
+
     void PySys_AppendPath(std::string_view modules_directory)
     {
-        PyObject* msys {};
-        PyObject* path {};
+        PyObject_Ref msys(PyImport_ImportModule("sys"));
 
-        msys = PyImport_ImportModule("sys");
-
-        if (msys == nullptr)
+        if (!msys)
             return;
 
-        path = PyObject_GetAttrString(msys, "path");
+        PyObject_Ref path(PyObject_GetAttrString(msys, "path"));
 
-        if (path == nullptr)
+        if (!path)
             return;
 
         PyList_Append(path, PyUnicode_FromString(modules_directory.data()));
@@ -156,8 +206,8 @@ namespace py
     class hash_function
     {
     public:
-        explicit hash_function(PyObject* callable)
-            : hasher(callable)
+        explicit hash_function(PyObject_Ref callable)
+            : hasher(std::move(callable))
         {}
 
         ~hash_function() = default;
@@ -173,19 +223,19 @@ namespace py
             if (!*this)
                 return 0;
 
-            PyObject* param_tuple = PyTuple_New(1);
-            PyObject* param_value = PyUnicode_FromString(input.data());
+            PyObject_Ref pyarg(PyTuple_New(1));
+            PyObject_Ref value(PyUnicode_FromString(input.data()), semantic::shared);
 
-            PyTuple_SetItem(param_tuple, 0, param_value);
-
-            if (!param_value)
+            if (!value)
             {
                 printerr("Error building hash function argument for value {}\n", input);
                 PyErr_Print();
                 return 0;
             }
 
-            PyObject* digest = PyObject_CallObject(hasher, param_tuple);
+            PyTuple_SetItem(pyarg, 0, value);
+
+            PyObject_Ref digest(PyObject_CallObject(hasher, pyarg));
 
             if (!digest)
             {
@@ -198,7 +248,7 @@ namespace py
         }
 
     private:
-        PyObject* hasher;
+        PyObject_Ref hasher;
     };
 
     //  wrapper for the python context
@@ -213,8 +263,8 @@ namespace py
 
         static raii_context raii_instance;
 
-        inline static PyObject* imported_module;
-        inline static PyObject* imported_function;
+        inline static PyObject_Ref imported_module;
+        inline static PyObject_Ref imported_function;
 
     public:
         static bool import_module(std::string_view module_path_)
@@ -246,7 +296,7 @@ namespace py
             if (!imported_module || imported_function)
                 return false;
 
-            PyObject* symbol = PyObject_GetAttrString(imported_module, function_name.data());
+            PyObject_Ref symbol(PyObject_GetAttrString(imported_module, function_name.data()));
 
             if (!symbol)
             {
@@ -265,7 +315,7 @@ namespace py
             return true;
         }
 
-        static PyObject* get_imported_function()
+        static PyObject_Ref get_imported_function()
         {
             return imported_function;
         }
@@ -640,13 +690,6 @@ namespace exports
             else
                 first_block = false;
 
-
-            // JSON output
-            // "hashed": {
-            //	    "0xDEADBEEF": "LoadLibraryA",
-            //	    "0x000C0FEE": "CloseHandle"
-            //	}
-            //
             constexpr std::string_view fmt =
                     "\t{{\n"
                     "\t\t\"library\": \"{}\",\n";
