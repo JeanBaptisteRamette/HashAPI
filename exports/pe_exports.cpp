@@ -1,5 +1,6 @@
 #include <string_view>
 #include <filesystem>
+#include <syncstream>
 #include <iostream>
 #include <charconv>
 #include <cstring>
@@ -21,36 +22,25 @@
 namespace fs = std::filesystem;
 
 
-namespace detail::concurrency
-{
-    std::mutex cout_mutex;
-    std::mutex cerr_mutex;
-}
-
-
 using digest_t = long long;
 
 
 template<typename ...Args>
-void print(std::ostream& os, std::string_view fmt, Args&&... args)
+void print_stream(std::ostream& os, std::string_view fmt, Args&&... args)
 {
-    std::lock_guard stream_lock(detail::concurrency::cout_mutex);
-    os << std::vformat(fmt, std::make_format_args(args...));
+    std::osyncstream(os) << std::vformat(fmt, std::make_format_args(args...));
 }
 
 template<typename ...Args>
-void print(std::string_view fmt, Args&&... args)
+inline void print(std::string_view fmt, Args&&... args)
 {
-    std::lock_guard stream_lock(detail::concurrency::cout_mutex);
-    std::cout << std::vformat(fmt, std::make_format_args(args...));
+    print_stream(std::cout, fmt, args...);
 }
 
-
 template<typename ...Args>
-void printerr(std::string_view fmt, Args&&... args)
+inline void printerr(std::string_view fmt, Args&&... args)
 {
-    std::lock_guard stream_lock(detail::concurrency::cerr_mutex);
-    std::cerr << std::vformat(fmt, std::make_format_args(args...));
+    print_stream(std::cerr, fmt, args...);
 }
 
 
@@ -122,7 +112,7 @@ public:
                 "\t-of output format, default is lazy\n"
                 "The program will not run if both -d and -f arguments are not given\n";
 
-        print(std::cout, usage, program_name);
+        print(usage, program_name);
     }
 
 private:
@@ -675,15 +665,13 @@ namespace exports
             if (format == output_fmt::lazy) {
                 if (hashtable.empty())
                     for (const auto &sym: symbols)
-                        print(ostream, "{} {}\n", module, sym);
+                        print_stream(ostream, "{} {}\n", module, sym);
                 else
                     for (const auto &[hash, sym]: hashtable)
-                        print(ostream, "{} {:#x} {}\n", module, hash, sym);
+                        print_stream(ostream, "{} {:#x} {}\n", module, hash, sym);
 
                 return;
             }
-
-            // throw std::runtime_error("JSON output not fully implemented yet");
 
             if (!first_block)
                 ostream << ",\n";
@@ -723,7 +711,6 @@ namespace exports
                     ostream << '\n';
                 }
             }
-
 
             ostream << "\t\t]\n\t}";
         }
