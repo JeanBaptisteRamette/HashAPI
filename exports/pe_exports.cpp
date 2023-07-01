@@ -577,15 +577,18 @@ namespace exports
     std::vector<hash_pair> make_hashtable(std::vector<std::string>& symbols)
     {
         std::vector<hash_pair> hashtable;
-        hashtable.reserve(symbols.size());
 
         py::gil_guard lock_guard;
 
         py::hash_function hasher(py::context::get_imported_function());
 
         if (hasher)
-            for (auto& symbol: symbols)
-                hashtable.push_back( { hasher(symbol), std::move(symbol) } );
+        {
+            hashtable.reserve(symbols.size());
+
+            for (auto &symbol: symbols)
+                hashtable.push_back({hasher(symbol), std::move(symbol)});
+        }
 
         return hashtable;
     }
