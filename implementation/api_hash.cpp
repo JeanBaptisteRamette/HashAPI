@@ -29,7 +29,7 @@ PNT_PEB NtCurrentPeb()
 }
 
 
-PNT_LDR_DATA_TABLE_ENTRY ResolveInMemoryModule(uint32_t ModuleHash)
+[[msvc::noinline]] PNT_LDR_DATA_TABLE_ENTRY ResolveInMemoryModule(uint32_t ModuleHash)
 {
     const auto Peb = NtCurrentPeb();
     const auto LoaderData = Peb->Ldr;
@@ -50,7 +50,7 @@ PNT_LDR_DATA_TABLE_ENTRY ResolveInMemoryModule(uint32_t ModuleHash)
 }
 
 
-LPVOID ResolveProcedure(LPBYTE ImageBase, uint32_t ProcedureHash)
+[[msvc::noinline]] LPVOID ResolveProcedure(LPBYTE ImageBase, uint32_t ProcedureHash)
 {
     const auto DosHdr = (PIMAGE_DOS_HEADER)ImageBase;
 
@@ -84,9 +84,9 @@ LPVOID ResolveProcedure(LPBYTE ImageBase, uint32_t ProcedureHash)
     const auto ExportDirVirt = OptHdr.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
     const auto ExportDir = (PIMAGE_EXPORT_DIRECTORY)(ImageBase + ExportDirVirt);
 
-    auto Ordinals  = (LPWORD) (ImageBase + ExportDir->AddressOfNameOrdinals);
-    auto Functions = (LPDWORD)(ImageBase + ExportDir->AddressOfFunctions);
-    auto Symbols   = (LPDWORD)(ImageBase + ExportDir->AddressOfNames);
+    const auto Ordinals  = (LPWORD) (ImageBase + ExportDir->AddressOfNameOrdinals);
+    const auto Functions = (LPDWORD)(ImageBase + ExportDir->AddressOfFunctions);
+    const auto Symbols   = (LPDWORD)(ImageBase + ExportDir->AddressOfNames);
 
     for (size_t i = 0; i < ExportDir->NumberOfNames; ++i)
     {
@@ -101,7 +101,7 @@ LPVOID ResolveProcedure(LPBYTE ImageBase, uint32_t ProcedureHash)
 
 
 template<typename Function>
-Function ResolveAPI(uint32_t ModuleHash, uint32_t ProcedureHash)
+[[msvc::noinline]] Function ResolveAPI(uint32_t ModuleHash, uint32_t ProcedureHash)
 {
     NT_LDR_DATA_TABLE_ENTRY* const Module = ResolveInMemoryModule(ModuleHash);
 
