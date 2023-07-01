@@ -107,7 +107,7 @@ public:
                 "Usage: {} -d <input directory> -f <input file> -o <output file> -t <thread counts> [-r] [-of (lazy|json)] -p <python file>\n"
                 "\t-o  optional output file, default is exported.txt\n"
                 "\t-r  optional recursive flag\n"
-                "\t-v  skip file that don't have .DLL/.dll extension\n"
+                "\t-e  skip file that don't have .DLL/.dll extension\n"
                 "\t-p  path to a python file containing the hashing function to create a hashtable\n"
                 "\t-H  name of the python hashing function to execute, default is \"digest\"\n"
                 "\t-of output format, default is lazy\n"
