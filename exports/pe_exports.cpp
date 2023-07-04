@@ -107,7 +107,7 @@ public:
                 "Usage: {} -d <input directory> -f <input file> -o <output file> -t <thread counts> [-r] [-of (lazy|json)] -p <python file>\n"
                 "\t-o  optional output file, default is exported.txt\n"
                 "\t-r  optional recursive flag\n"
-                "\t-e  skip file that don't have .DLL/.dll extension\n"
+                "\t-e  skip file that don't have .DLL/.dll or .EXE/.exe extension\n"
                 "\t-p  path to a python file containing the hashing function to create a hashtable\n"
                 "\t-H  name of the python hashing function to execute, default is \"digest\"\n"
                 "\t-of output format, default is lazy\n"
@@ -398,10 +398,16 @@ namespace exports
         {
             for (auto& entry : walker)
             {
-                auto path = entry.path();
+                fs::path path = entry.path();
 
-                if (params::has_option("-e") && path.extension() != ".DLL" && path.extension() != ".dll")
-                    continue;
+                if (params::has_option("-e"))
+                {
+                    const bool ext_dll = path.extension() != ".DLL" && path.extension() != ".dll";
+                    const bool ext_exe = path.extension() != ".EXE" && path.extension() != ".exe";
+
+                    if (!ext_dll && !ext_exe)
+                        continue;
+                }
 
                 files.push(std::move(path));
             }
@@ -511,12 +517,6 @@ namespace exports
         if (nthdrs->Signature != IMAGE_NT_SIGNATURE)
         {
             printerr("Dropping file because of wrong PE header signature");
-            return nullptr;
-        }
-
-        if (!(nthdrs->FileHeader.Characteristics & IMAGE_FILE_DLL))
-        {
-            printerr("Dropping file because of wrong file header characteristics (!IMAGE_FILE_DLL)");
             return nullptr;
         }
 
