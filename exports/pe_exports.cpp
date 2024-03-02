@@ -57,7 +57,7 @@ public:
         program_name = argv[0];
     }
 
-    static std::string_view param_of(std::string_view option, std::string_view default_value = {})
+    static std::string param_of(std::string_view option, std::string default_value = {})
     {
         const auto beg = std::cbegin(tokens);
         const auto end = std::cend(tokens);
@@ -65,7 +65,7 @@ public:
         auto itr = std::find(beg, end, option);
 
         if (itr != end && ++itr != end)
-            return *itr;
+            return std::string(*itr);
 
         return default_value;
     }
@@ -96,7 +96,7 @@ public:
 
     static bool has_value(std::string_view option)
     {
-        const std::string_view value = param_of(option);
+        const auto value = param_of(option);
 
         return !value.empty();
     }
@@ -138,7 +138,7 @@ namespace py
     public:
         PyObject_Ref() : handle(nullptr) {}
 
-        PyObject_Ref(PyObject* ptr, semantic ownership = semantic::owning) : handle(ptr)
+        explicit PyObject_Ref(PyObject* ptr, semantic ownership = semantic::owning) : handle(ptr)
         {
             if (ownership == semantic::shared)
                 Py_XINCREF(handle);
@@ -147,7 +147,7 @@ namespace py
         ~PyObject_Ref() { Py_XDECREF(handle); }
 
         PyObject_Ref(const PyObject_Ref& right) : handle(right.handle) { Py_XINCREF(handle); }
-        PyObject_Ref(PyObject_Ref&& right) : handle(nullptr)
+        PyObject_Ref(PyObject_Ref&& right) noexcept : handle(nullptr)
         {
             std::swap(handle, right.handle);
         }
@@ -427,7 +427,7 @@ namespace exports
         }
 
         if (!path_file.empty() && fs::exists(path_file))
-			files.push(path_file);
+			files.emplace(path_file);
 
         if (files.empty())
             std::cerr << "Could not enumerate files from provided arguments, no such directory or no files to process\n";

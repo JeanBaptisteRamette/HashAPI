@@ -1,7 +1,14 @@
 #include <cstdint>
 #include <string_view>
-
 #include "ntdef64.h"
+
+// Let the user choose if he wants it the hard-way or not
+#ifdef NOINLINE
+#define IMP_INLINING __declspec(noinline)
+#else
+#define IMP_INLINING __forceinline
+#endif
+
 
 // Make a template because module names are stored as wide strings in the PEB
 template<typename char_type>
@@ -28,8 +35,7 @@ PNT_PEB NtCurrentPeb()
     return reinterpret_cast<PNT_PEB>(__readgsqword(0x60));
 }
 
-
-[[msvc::noinline]] PNT_LDR_DATA_TABLE_ENTRY ResolveInMemoryModule(uint32_t ModuleHash)
+IMP_INLINING PNT_LDR_DATA_TABLE_ENTRY ResolveInMemoryModule(uint32_t ModuleHash)
 {
     const auto Peb = NtCurrentPeb();
     const auto LoaderData = Peb->Ldr;
@@ -49,8 +55,7 @@ PNT_PEB NtCurrentPeb()
     return nullptr;
 }
 
-
-[[msvc::noinline]] LPVOID ResolveProcedure(LPBYTE ImageBase, uint32_t ProcedureHash)
+IMP_INLINING LPVOID ResolveProcedure(LPBYTE ImageBase, uint32_t ProcedureHash)
 {
     const auto DosHdr = (PIMAGE_DOS_HEADER)ImageBase;
 
@@ -99,9 +104,8 @@ PNT_PEB NtCurrentPeb()
     return nullptr;
 }
 
-
 template<typename Function>
-[[msvc::noinline]] Function ResolveAPI(uint32_t ModuleHash, uint32_t ProcedureHash)
+IMP_INLINING Function ResolveAPI(uint32_t ModuleHash, uint32_t ProcedureHash)
 {
     NT_LDR_DATA_TABLE_ENTRY* const Module = ResolveInMemoryModule(ModuleHash);
 
